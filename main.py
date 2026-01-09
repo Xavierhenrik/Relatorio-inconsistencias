@@ -4,8 +4,10 @@ import csv
 import re
 import os
 import sys
+import subprocess
+import time
+import socket
 from dotenv import load_dotenv  # <--- IMPORTANTE
-from sshtunnel import SSHTunnelForwarder
 from contextlib import contextmanager
 
 # Carrega as variáveis do arquivo .env
@@ -79,43 +81,129 @@ def salvar_csv(nome_arquivo, dados, cabecalho):
     except Exception as e:
         print(f"Erro ao salvar {nome_arquivo}: {e}")
 
+def verificar_porta_disponivel(port):
+    """Verifica se uma porta está disponível para uso."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(('127.0.0.1', port))
+        sock.close()
+        return True
+    except OSError:
+        return False
+
+def aguardar_porta_aberta(port, timeout=10):
+    """Aguarda até que a porta esteja aberta e aceitando conexões."""
+    inicio = time.time()
+    while time.time() - inicio < timeout:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(('127.0.0.1', port))
+            sock.close()
+            return True
+        except (socket.error, ConnectionRefusedError):
+            time.sleep(0.5)
+    return False
+
 @contextmanager
 def gerenciar_tunnel_ssh():
-    """Context manager para gerenciar ciclo de vida do túnel SSH (obrigatório)."""
-    tunnel = None
+    """Context manager para gerenciar ciclo de vida do túnel SSH usando comando nativo."""
+    processo_ssh = None
     
     try:
         print(f"[SSH] Conectando ao servidor {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}...")
         
-        # Configura autenticação (senha ou chave privada)
-        ssh_auth = {}
+        # Verifica se a porta local está disponível
+        if not verificar_porta_disponivel(SSH_CONFIG['local_bind_port']):
+            print(f"[SSH] Aviso: Porta {SSH_CONFIG['local_bind_port']} já está em uso.")
+            print(f"[SSH] Assumindo que o túnel já está ativo...")
+            yield None
+            return
+        
+        # Monta o comando SSH para criar o túnel
+        # Formato: ssh -L local_port:remote_host:remote_port user@ssh_host -p ssh_port -N -o StrictHostKeyChecking=no
+        remote_host, remote_port = SSH_CONFIG['remote_bind_address']
+        
+        ssh_cmd = [
+            'ssh',
+            '-L', f"{SSH_CONFIG['local_bind_port']}:{remote_host}:{remote_port}",
+            '-p', str(SSH_CONFIG['ssh_port']),
+            '-l', SSH_CONFIG['ssh_user'],
+            SSH_CONFIG['ssh_host'],
+            '-N',  # Não executa comando remoto
+            '-o', 'StrictHostKeyChecking=no',  # Aceita host automaticamente
+            '-o', 'ServerAliveInterval=60',  # Keep-alive
+            '-o', 'ServerAliveCountMax=3'
+        ]
+        
+        # Se houver chave privada, adiciona ao comando
         if SSH_CONFIG['ssh_pkey']:
-            ssh_auth['ssh_pkey'] = SSH_CONFIG['ssh_pkey']
-        elif SSH_CONFIG['ssh_password']:
-            ssh_auth['ssh_password'] = SSH_CONFIG['ssh_password']
+            ssh_cmd.insert(1, '-i')
+            ssh_cmd.insert(2, SSH_CONFIG['ssh_pkey'])
+        
+        # Inicia o processo SSH em background
+        print(f"[SSH] Estabelecendo túnel: localhost:{SSH_CONFIG['local_bind_port']} -> {remote_host}:{remote_port}")
+        
+        # No Windows, usa CREATE_NEW_PROCESS_GROUP para poder encerrar depois
+        if os.name == 'nt':  # Windows
+            processo_ssh = subprocess.Popen(
+                ssh_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:  # Linux/Mac
+            processo_ssh = subprocess.Popen(
+                ssh_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                preexec_fn=os.setsid
+            )
+        
+        # Se houver senha, envia via stdin (funciona com sshpass ou similar)
+        if SSH_CONFIG['ssh_password'] and not SSH_CONFIG['ssh_pkey']:
+            print("[SSH] Nota: Para autenticação por senha, considere usar chave SSH.")
+            print("[SSH] Você pode precisar digitar a senha manualmente...")
+        
+        # Aguarda o túnel ficar disponível
+        print(f"[SSH] Aguardando túnel ficar ativo...", end=" ")
+        if aguardar_porta_aberta(SSH_CONFIG['local_bind_port'], timeout=15):
+            print("✓")
+            print(f"[SSH] Túnel SSH estabelecido com sucesso!")
         else:
-            raise ValueError("SSH requer SSH_PASSWORD ou SSH_PKEY_PATH no .env")
+            raise Exception("Timeout ao aguardar túnel SSH ficar ativo")
         
-        tunnel = SSHTunnelForwarder(
-            (SSH_CONFIG['ssh_host'], SSH_CONFIG['ssh_port']),
-            ssh_username=SSH_CONFIG['ssh_user'],
-            remote_bind_address=SSH_CONFIG['remote_bind_address'],
-            local_bind_address=('127.0.0.1', SSH_CONFIG['local_bind_port']),
-            **ssh_auth
-        )
+        yield processo_ssh
         
-        tunnel.start()
-        print(f"[SSH] Túnel estabelecido: localhost:{tunnel.local_bind_port} -> {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['remote_bind_address'][1]}")
-        
-        yield tunnel
-        
+    except FileNotFoundError:
+        print(f"[SSH] ERRO: Comando 'ssh' não encontrado no sistema.")
+        print(f"[SSH] Certifique-se de que o OpenSSH está instalado:")
+        print(f"[SSH]   - Windows: Settings > Apps > Optional Features > OpenSSH Client")
+        print(f"[SSH]   - Linux: sudo apt-get install openssh-client")
+        sys.exit(1)
     except Exception as e:
         print(f"[SSH] Erro ao estabelecer túnel: {e}")
         print("[SSH] Verifique as configurações SSH no arquivo .env")
+        if processo_ssh:
+            try:
+                processo_ssh.terminate()
+            except:
+                pass
         sys.exit(1)
     finally:
-        if tunnel and tunnel.is_active:
-            tunnel.stop()
+        if processo_ssh:
+            print("[SSH] Encerrando túnel SSH...", end=" ")
+            try:
+                processo_ssh.terminate()
+                processo_ssh.wait(timeout=5)
+                print("✓")
+            except:
+                try:
+                    processo_ssh.kill()
+                    print("✓ (forçado)")
+                except:
+                    print("⚠️  (processo pode continuar em background)")
             print("[SSH] Túnel SSH encerrado.")
 
 def ajustar_hosts_para_tunnel(db_config):
