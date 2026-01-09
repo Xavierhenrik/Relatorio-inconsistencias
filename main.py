@@ -3,7 +3,10 @@ from psycopg2.extras import RealDictCursor
 import csv
 import re
 import os
+import sys
 from dotenv import load_dotenv  # <--- IMPORTANTE
+from sshtunnel import SSHTunnelForwarder
+from contextlib import contextmanager
 
 # Carrega as variáveis do arquivo .env
 load_dotenv()
@@ -31,6 +34,22 @@ DB_PESSOA = {
 }
 
 SENHA_ACCOUNTS = os.getenv('DB_ACCOUNTS_PASS')
+
+# --- CONFIGURAÇÃO SSH TUNNEL (OBRIGATÓRIO) ---
+SSH_CONFIG = {
+    'ssh_host': os.getenv('SSH_HOST'),
+    'ssh_user': os.getenv('SSH_USER'),
+    'ssh_port': int(os.getenv('SSH_PORT', '22')),
+    'ssh_password': os.getenv('SSH_PASSWORD'),
+    'ssh_pkey': os.getenv('SSH_PKEY_PATH'),  # Caminho para chave privada (opcional)
+    'remote_bind_address': (os.getenv('SSH_REMOTE_DB_HOST', 'localhost'), int(os.getenv('SSH_REMOTE_DB_PORT', '5432'))),
+    'local_bind_port': int(os.getenv('SSH_LOCAL_PORT', '5435'))
+}
+
+# Validação: túnel SSH é obrigatório
+if not SSH_CONFIG['ssh_host'] or not SSH_CONFIG['ssh_user']:
+    print("ERRO: SSH_HOST e SSH_USER são obrigatórios no arquivo .env")
+    sys.exit(1)
 
 # --- FUNÇÕES AUXILIARES ---
 def limpar_cpf(cpf):
@@ -60,182 +79,304 @@ def salvar_csv(nome_arquivo, dados, cabecalho):
     except Exception as e:
         print(f"Erro ao salvar {nome_arquivo}: {e}")
 
+@contextmanager
+def gerenciar_tunnel_ssh():
+    """Context manager para gerenciar ciclo de vida do túnel SSH (obrigatório)."""
+    tunnel = None
+    
+    try:
+        print(f"[SSH] Conectando ao servidor {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['ssh_port']}...")
+        
+        # Configura autenticação (senha ou chave privada)
+        ssh_auth = {}
+        if SSH_CONFIG['ssh_pkey']:
+            ssh_auth['ssh_pkey'] = SSH_CONFIG['ssh_pkey']
+        elif SSH_CONFIG['ssh_password']:
+            ssh_auth['ssh_password'] = SSH_CONFIG['ssh_password']
+        else:
+            raise ValueError("SSH requer SSH_PASSWORD ou SSH_PKEY_PATH no .env")
+        
+        tunnel = SSHTunnelForwarder(
+            (SSH_CONFIG['ssh_host'], SSH_CONFIG['ssh_port']),
+            ssh_username=SSH_CONFIG['ssh_user'],
+            remote_bind_address=SSH_CONFIG['remote_bind_address'],
+            local_bind_address=('127.0.0.1', SSH_CONFIG['local_bind_port']),
+            **ssh_auth
+        )
+        
+        tunnel.start()
+        print(f"[SSH] Túnel estabelecido: localhost:{tunnel.local_bind_port} -> {SSH_CONFIG['ssh_host']}:{SSH_CONFIG['remote_bind_address'][1]}")
+        
+        yield tunnel
+        
+    except Exception as e:
+        print(f"[SSH] Erro ao estabelecer túnel: {e}")
+        print("[SSH] Verifique as configurações SSH no arquivo .env")
+        sys.exit(1)
+    finally:
+        if tunnel and tunnel.is_active:
+            tunnel.stop()
+            print("[SSH] Túnel SSH encerrado.")
+
+def ajustar_hosts_para_tunnel(db_config):
+    """Ajusta host e porta dos bancos para usar túnel SSH (obrigatório)."""
+    config = db_config.copy()
+    # Todos os bancos acessam via localhost na porta do túnel
+    config['host'] = '127.0.0.1'
+    config['port'] = SSH_CONFIG['local_bind_port']
+    return config
+
+def testar_conexoes(db_gestao, db_contrato, db_pessoa):
+    """Testa todas as conexões de banco de dados."""
+    print("\n" + "="*50)
+    print("TESTANDO CONEXÕES COM OS BANCOS DE DADOS")
+    print("="*50)
+    
+    erros = []
+    
+    # Teste 1: Banco GESTÃO
+    try:
+        print("[1/3] Testando conexão com banco GESTÃO...", end=" ")
+        conn = psycopg2.connect(**db_gestao)
+        conn.close()
+        print("✓ OK")
+    except Exception as e:
+        print("✗ FALHOU")
+        erros.append(f"GESTÃO: {e}")
+    
+    # Teste 2: Banco CONTRATO
+    try:
+        print("[2/3] Testando conexão com banco CONTRATO...", end=" ")
+        conn = psycopg2.connect(**db_contrato)
+        conn.close()
+        print("✓ OK")
+    except Exception as e:
+        print("✗ FALHOU")
+        erros.append(f"CONTRATO: {e}")
+    
+    # Teste 3: Banco PESSOA
+    try:
+        print("[3/3] Testando conexão com banco PESSOA...", end=" ")
+        conn = psycopg2.connect(**db_pessoa)
+        conn.close()
+        print("✓ OK")
+    except Exception as e:
+        print("✗ FALHOU")
+        erros.append(f"PESSOA: {e}")
+    
+    print("="*50)
+    
+    if erros:
+        print("\n❌ ERRO: Falha ao conectar nos seguintes bancos:")
+        for erro in erros:
+            print(f"   - {erro}")
+        print("\nVerifique as configurações no arquivo .env e tente novamente.")
+        return False
+    else:
+        print("\n✅ Conexões estabelecidas com sucesso!")
+        return True
+
 def main():
     print("--- INICIANDO DIAGNÓSTICO DE DIVERGÊNCIAS ---")
     
-    # LISTAS PARA RELATÓRIOS
-    lista_email_duplicado = []
-    lista_um_inexistente = []
-    lista_ambos_inexistentes = []
-    lista_erros_outros = []
+    # Gerencia túnel SSH automaticamente
+    with gerenciar_tunnel_ssh():
+        # Ajusta configurações dos bancos para usar túnel se necessário
+        db_gestao_ajustado = ajustar_hosts_para_tunnel(DB_GESTAO)
+        db_contrato_ajustado = ajustar_hosts_para_tunnel(DB_CONTRATO)
+        db_pessoa_ajustado = ajustar_hosts_para_tunnel(DB_PESSOA)
+        
+        # PASSO 0: TESTE DE CONEXÕES
+        conexoes_ok = testar_conexoes(db_gestao_ajustado, db_contrato_ajustado, db_pessoa_ajustado)
+        
+        if not conexoes_ok:
+            print("\n⚠️  Encerrando script devido a erros de conexão.")
+            return
+        
+        # Solicita confirmação do usuário
+        print("\n" + "="*50)
+        resposta = input("Prosseguir com análise? (S/N): ").strip().upper()
+        print("="*50)
+        
+        if resposta not in ['S', 'SIM', 'Y', 'YES']:
+            print("\n⚠️  Análise cancelada pelo usuário.")
+            return
+        
+        print("\n🚀 Iniciando análise de divergências...\n")
+        
+        # LISTAS PARA RELATÓRIOS
+        lista_email_duplicado = []
+        lista_um_inexistente = []
+        lista_ambos_inexistentes = []
+        lista_erros_outros = []
 
-    # 1. BUSCAR DIVERGÊNCIAS (GESTAO + ACCOUNTS via DBLINK)
-    print("[1/4] Buscando divergências iniciais...")
-    divergencias = []
-    
-    sql_base = """
-    WITH divergencias AS (
-        SELECT
-           a.id AS id_account,
-           s.sso_id AS sso_id_gestao,
-           a.cpf_cnpj AS cpf_visual_accounts,
-           s.cpf_cnpj AS cpf_visual_gestao,
-           REGEXP_REPLACE(a.cpf_cnpj, '\D','', 'g') AS cpf_accounts_limpo, 
-           REGEXP_REPLACE(s.cpf_cnpj, '\D','', 'g') AS cpf_gestao_limpo
-        FROM tb_usuario s
-        INNER JOIN (
-          SELECT cpf_cnpj, id
-          FROM dblink(
-           'host=issec-live-db.c9aok84ka6e0.sa-east-1.rds.amazonaws.com dbname=accounts_api user=accounts_api password={SENHA_ACCOUNTS}',
-              'SELECT cpf_cnpj, id FROM users'
-          ) AS accounts(cpf_cnpj varchar(255), id uuid) 
-        ) a ON s.sso_id = a.id 
-        WHERE REGEXP_REPLACE(s.cpf_cnpj,'\D','', 'g') <> REGEXP_REPLACE(a.cpf_cnpj,'\D','', 'g')
-    )
-    SELECT * FROM divergencias;
-    """
-
-    try:
-        conn = psycopg2.connect(**DB_GESTAO)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute(sql_base)
-        divergencias = cur.fetchall()
-        conn.close()
-    except Exception as e:
-        print(f"Erro crítico ao buscar divergências: {e}")
-        return
-
-    if not divergencias:
-        print("Nenhuma divergência encontrada. Encerrando.")
-        return
-
-    # Coletar todos os CPFs únicos para as próximas consultas (Otimização)
-    todos_cpfs = set()
-    for d in divergencias:
-        todos_cpfs.add(d['cpf_accounts_limpo'])
-        todos_cpfs.add(d['cpf_gestao_limpo'])
-    
-    cpfs_tuple = tuple(todos_cpfs)
-
-    # 2. VERIFICAR EXISTÊNCIA NO CONTRATO (SEGURADO)
-    print(f"[2/4] Validando {len(todos_cpfs)} CPFs na tabela Segurado...")
-    cpfs_existentes_segurado = set()
-    
-    try:
-        conn = psycopg2.connect(**DB_CONTRATO)
-        cur = conn.cursor()
-        # Busca CPFs limpos da tabela segurado que coincidem com nossa lista
-        sql_segurado = f"""
-            SELECT REGEXP_REPLACE(cpf_cnpj, '\D','', 'g') 
-            FROM segurado 
-            WHERE REGEXP_REPLACE(cpf_cnpj, '\D','', 'g') IN %s
+        # 1. BUSCAR DIVERGÊNCIAS (GESTAO + ACCOUNTS via DBLINK)
+        print("[1/4] Buscando divergências iniciais...")
+        divergencias = []
+        
+        sql_base = f"""
+        WITH divergencias AS (
+            SELECT
+               a.id AS id_account,
+               s.sso_id AS sso_id_gestao,
+               a.cpf_cnpj AS cpf_visual_accounts,
+               s.cpf_cnpj AS cpf_visual_gestao,
+               REGEXP_REPLACE(a.cpf_cnpj, '\D','', 'g') AS cpf_accounts_limpo, 
+               REGEXP_REPLACE(s.cpf_cnpj, '\D','', 'g') AS cpf_gestao_limpo
+            FROM tb_usuario s
+            INNER JOIN (
+              SELECT cpf_cnpj, id
+              FROM dblink(
+               'host=issec-live-db.c9aok84ka6e0.sa-east-1.rds.amazonaws.com dbname=accounts_api user=accounts_api password={SENHA_ACCOUNTS}',
+                  'SELECT cpf_cnpj, id FROM users'
+              ) AS accounts(cpf_cnpj varchar(255), id uuid) 
+            ) a ON s.sso_id = a.id 
+            WHERE REGEXP_REPLACE(s.cpf_cnpj,'\D','', 'g') <> REGEXP_REPLACE(a.cpf_cnpj,'\D','', 'g')
+        )
+        SELECT * FROM divergencias;
         """
-        cur.execute(sql_segurado, (cpfs_tuple,))
-        results = cur.fetchall()
-        for row in results:
-            cpfs_existentes_segurado.add(row[0]) # Adiciona ao Set de existência
-        conn.close()
-    except Exception as e:
-        print(f"Erro ao consultar Segurado: {e}")
-        return
 
-    # 3. BUSCAR EMAILS (PESSOA/CONTATO)
-    print("[3/4] Buscando e-mails no quarto banco...")
-    mapa_emails = {} # { 'cpf_limpo': 'email' }
-    
-    try:
-        conn = psycopg2.connect(**DB_PESSOA)
-        cur = conn.cursor()
+        try:
+            conn = psycopg2.connect(**db_gestao_ajustado)
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute(sql_base)
+            divergencias = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            print(f"Erro crítico ao buscar divergências: {e}")
+            return
+
+        if not divergencias:
+            print("Nenhuma divergência encontrada. Encerrando.")
+            return
+
+        # Coletar todos os CPFs únicos para as próximas consultas (Otimização)
+        todos_cpfs = set()
+        for d in divergencias:
+            todos_cpfs.add(d['cpf_accounts_limpo'])
+            todos_cpfs.add(d['cpf_gestao_limpo'])
         
-        # Query solicitada adaptada para buscar em lote
-        # Precisamos buscar pelo CPF formatado ou limpo? 
-        # Assumindo que o banco pessoa armazena formatado, aplicamos replace no WHERE
-        sql_emails = f"""
-            SELECT REGEXP_REPLACE(p.cpf_cnpj, '\D','', 'g') as cpf, c.valor as email
-            FROM pessoa p 
-            LEFT JOIN contato c ON p.id = c.pessoa_id
-            WHERE c.tipo = 'EMAIL'
-            AND REGEXP_REPLACE(p.cpf_cnpj, '\D','', 'g') IN %s
-        """
-        cur.execute(sql_emails, (cpfs_tuple,))
-        results = cur.fetchall()
+        cpfs_tuple = tuple(todos_cpfs)
+
+        # 2. VERIFICAR EXISTÊNCIA NO CONTRATO (SEGURADO)
+        print(f"[2/4] Validando {len(todos_cpfs)} CPFs na tabela Segurado...")
+        cpfs_existentes_segurado = set()
         
-        for cpf, email in results:
-            if email:
-                mapa_emails[cpf] = email.strip() # Normaliza email
-        conn.close()
-    except Exception as e:
-        print(f"Erro ao consultar Emails: {e}")
-        return
+        try:
+            conn = psycopg2.connect(**db_contrato_ajustado)
+            cur = conn.cursor()
+            # Busca CPFs limpos da tabela segurado que coincidem com nossa lista
+            sql_segurado = f"""
+                SELECT REGEXP_REPLACE(cpf_cnpj, '\D','', 'g') 
+                FROM segurado 
+                WHERE REGEXP_REPLACE(cpf_cnpj, '\D','', 'g') IN %s
+            """
+            cur.execute(sql_segurado, (cpfs_tuple,))
+            results = cur.fetchall()
+            for row in results:
+                cpfs_existentes_segurado.add(row[0]) # Adiciona ao Set de existência
+            conn.close()
+        except Exception as e:
+            print(f"Erro ao consultar Segurado: {e}")
+            return
 
-    # 4. PROCESSAMENTO LÓGICO E CONTAGEM
-    print("[4/4] Processando regras de negócio...")
-
-    for item in divergencias:
-        cpf_acc = item['cpf_accounts_limpo']
-        cpf_ges = item['cpf_gestao_limpo']
+        # 3. BUSCAR EMAILS (PESSOA/CONTATO)
+        print("[3/4] Buscando e-mails no quarto banco...")
+        mapa_emails = {} # { 'cpf_limpo': 'email' }
         
-        # Verifica existência na tabela segurado
-        existe_acc = cpf_acc in cpfs_existentes_segurado
-        existe_ges = cpf_ges in cpfs_existentes_segurado
-        
-        # Estrutura base do relatório
-        linha_relatorio = {
-            'id_accounts': item['id_account'],
-            'sso_id_gestao': item['sso_id_gestao'],
-            'cpf_gestao': item['cpf_visual_gestao'],
-            'cpf_accounts': item['cpf_visual_accounts'],
-            'existe_segurado_gestao': "SIM" if existe_ges else "NAO",
-            'existe_segurado_accounts': "SIM" if existe_acc else "NAO",
-            'dono_real_eh_accounts': "SIM" if existe_acc else "NAO", # Conforme solicitado
-            'email_comum': None
-        }
+        try:
+            conn = psycopg2.connect(**db_pessoa_ajustado)
+            cur = conn.cursor()
+            
+            # Query solicitada adaptada para buscar em lote
+            # Precisamos buscar pelo CPF formatado ou limpo? 
+            # Assumindo que o banco pessoa armazena formatado, aplicamos replace no WHERE
+            sql_emails = f"""
+                SELECT REGEXP_REPLACE(p.cpf_cnpj, '\D','', 'g') as cpf, c.valor as email
+                FROM pessoa p 
+                LEFT JOIN contato c ON p.id = c.pessoa_id
+                WHERE c.tipo = 'EMAIL'
+                AND REGEXP_REPLACE(p.cpf_cnpj, '\D','', 'g') IN %s
+            """
+            cur.execute(sql_emails, (cpfs_tuple,))
+            results = cur.fetchall()
+            
+            for cpf, email in results:
+                if email:
+                    mapa_emails[cpf] = email.strip() # Normaliza email
+            conn.close()
+        except Exception as e:
+            print(f"Erro ao consultar Emails: {e}")
+            return
 
-        # CASO 1: AMBOS INEXISTENTES EM SEGURADO
-        if not existe_acc and not existe_ges:
-            lista_ambos_inexistentes.append(linha_relatorio)
-            continue
+        # 4. PROCESSAMENTO LÓGICO E CONTAGEM
+        print("[4/4] Processando regras de negócio...")
 
-        # CASO 2: UM DELES INEXISTENTE
-        if (existe_acc and not existe_ges) or (not existe_acc and existe_ges):
-            lista_um_inexistente.append(linha_relatorio)
-            # Nota: O fluxo pode parar aqui ou continuar para verificar email mesmo assim?
-            # Pela lógica comum, se um não existe, é inconsistência de cadastro, mas vamos verificar email apenas se ambos existirem ou se solicitado.
-            # Vou assumir que se falta um, já cai nessa categoria e encerra.
-            continue 
+        for item in divergencias:
+            cpf_acc = item['cpf_accounts_limpo']
+            cpf_ges = item['cpf_gestao_limpo']
+            
+            # Verifica existência na tabela segurado
+            existe_acc = cpf_acc in cpfs_existentes_segurado
+            existe_ges = cpf_ges in cpfs_existentes_segurado
+            
+            # Estrutura base do relatório
+            linha_relatorio = {
+                'id_accounts': item['id_account'],
+                'sso_id_gestao': item['sso_id_gestao'],
+                'cpf_gestao': item['cpf_visual_gestao'],
+                'cpf_accounts': item['cpf_visual_accounts'],
+                'existe_segurado_gestao': "SIM" if existe_ges else "NAO",
+                'existe_segurado_accounts': "SIM" if existe_acc else "NAO",
+                'dono_real_eh_accounts': "SIM" if existe_acc else "NAO", # Conforme solicitado
+                'email_comum': None
+            }
 
-        # CASO 3: AMBOS EXISTEM -> VERIFICAR EMAIL
-        email_acc = mapa_emails.get(cpf_acc)
-        email_ges = mapa_emails.get(cpf_ges)
+            # CASO 1: AMBOS INEXISTENTES EM SEGURADO
+            if not existe_acc and not existe_ges:
+                lista_ambos_inexistentes.append(linha_relatorio)
+                continue
 
-        if email_acc and email_ges and (email_acc == email_ges):
-            linha_relatorio['email_comum'] = email_acc
-            lista_email_duplicado.append(linha_relatorio)
-        else:
-            # Se chegou aqui: existem no segurado, mas emails diferentes ou nulos
-            lista_erros_outros.append(linha_relatorio)
+            # CASO 2: UM DELES INEXISTENTE
+            if (existe_acc and not existe_ges) or (not existe_acc and existe_ges):
+                lista_um_inexistente.append(linha_relatorio)
+                # Nota: O fluxo pode parar aqui ou continuar para verificar email mesmo assim?
+                # Pela lógica comum, se um não existe, é inconsistência de cadastro, mas vamos verificar email apenas se ambos existirem ou se solicitado.
+                # Vou assumir que se falta um, já cai nessa categoria e encerra.
+                continue 
 
-    # 5. EXIBIÇÃO E SALVAMENTO
-    print("\n" + "="*40)
-    print("RESUMO FINAL DA OPERAÇÃO")
-    print("="*40)
-    print(f"1. E-mails Duplicados (Inconsistência Confirmada): {len(lista_email_duplicado)}")
-    print(f"2. Um dos CPFs não existe em Segurado:             {len(lista_um_inexistente)}")
-    print(f"3. Ambos CPFs não existem em Segurado:             {len(lista_ambos_inexistentes)}")
-    print(f"4. Outros (Existem mas e-mail não bate/nulo):      {len(lista_erros_outros)}")
-    print("-" * 40)
-    print(f"TOTAL ANALISADO: {len(divergencias)}")
-    print("="*40)
+            # CASO 3: AMBOS EXISTEM -> VERIFICAR EMAIL
+            email_acc = mapa_emails.get(cpf_acc)
+            email_ges = mapa_emails.get(cpf_ges)
 
-    # Headers para CSV
-    headers = ['id_accounts', 'sso_id_gestao', 'cpf_gestao', 'cpf_accounts', 
-               'existe_segurado_gestao', 'existe_segurado_accounts', 
-               'dono_real_eh_accounts', 'email_comum']
+            if email_acc and email_ges and (email_acc == email_ges):
+                linha_relatorio['email_comum'] = email_acc
+                lista_email_duplicado.append(linha_relatorio)
+            else:
+                # Se chegou aqui: existem no segurado, mas emails diferentes ou nulos
+                lista_erros_outros.append(linha_relatorio)
 
-    salvar_csv('relatorio_email_duplicado.csv', lista_email_duplicado, headers)
-    salvar_csv('relatorio_um_cpf_inexistente.csv', lista_um_inexistente, headers)
-    salvar_csv('relatorio_ambos_cpf_inexistentes.csv', lista_ambos_inexistentes, headers)
-    salvar_csv('relatorio_outros_erros.csv', lista_erros_outros, headers)
+        # 5. EXIBIÇÃO E SALVAMENTO
+        print("\n" + "="*40)
+        print("RESUMO FINAL DA OPERAÇÃO")
+        print("="*40)
+        print(f"1. E-mails Duplicados (Inconsistência Confirmada): {len(lista_email_duplicado)}")
+        print(f"2. Um dos CPFs não existe em Segurado:             {len(lista_um_inexistente)}")
+        print(f"3. Ambos CPFs não existem em Segurado:             {len(lista_ambos_inexistentes)}")
+        print(f"4. Outros (Existem mas e-mail não bate/nulo):      {len(lista_erros_outros)}")
+        print("-" * 40)
+        print(f"TOTAL ANALISADO: {len(divergencias)}")
+        print("="*40)
+
+        # Headers para CSV
+        headers = ['id_accounts', 'sso_id_gestao', 'cpf_gestao', 'cpf_accounts', 
+                   'existe_segurado_gestao', 'existe_segurado_accounts', 
+                   'dono_real_eh_accounts', 'email_comum']
+
+        salvar_csv('relatorio_email_duplicado.csv', lista_email_duplicado, headers)
+        salvar_csv('relatorio_um_cpf_inexistente.csv', lista_um_inexistente, headers)
+        salvar_csv('relatorio_ambos_cpf_inexistentes.csv', lista_ambos_inexistentes, headers)
+        salvar_csv('relatorio_outros_erros.csv', lista_erros_outros, headers)
 
 if __name__ == "__main__":
     main()
