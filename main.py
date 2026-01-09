@@ -39,6 +39,8 @@ DB_PESSOA = {
 }
 
 SENHA_ACCOUNTS = os.getenv('DB_ACCOUNTS_PASS')
+URL_ACCOUNTS = os.getenv('URL_ACCOUNTS')
+DB_ACCOUNTS_NAME_USER= os.getenv('DB_ACCOUNTS_NAME_USER')
 
 # --- CONFIGURAÇÃO SSH TUNNEL (OBRIGATÓRIO) ---
 SSH_CONFIG = {
@@ -393,7 +395,7 @@ def main():
             INNER JOIN (
               SELECT cpf_cnpj, id
               FROM dblink(
-               'host=issec-live-db.c9aok84ka6e0.sa-east-1.rds.amazonaws.com dbname=accounts_api user=accounts_api password={SENHA_ACCOUNTS}',
+               'host={URL_ACCOUNTS} dbname={DB_ACCOUNTS_NAME_USER} user={DB_ACCOUNTS_NAME_USER} password={SENHA_ACCOUNTS}',
                   'SELECT cpf_cnpj, id FROM users'
               ) AS accounts(cpf_cnpj varchar(255), id uuid) 
             ) a ON s.sso_id = a.id 
