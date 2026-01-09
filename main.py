@@ -13,8 +13,82 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-# Carrega as variáveis do arquivo .env
-load_dotenv()
+# ============================================
+# SELEÇÃO DE CLIENTE
+# ============================================
+def listar_clientes():
+    """Lista todos os arquivos .env de clientes com seus nomes amigáveis."""
+    from dotenv import dotenv_values
+    
+    clientes = []
+    for arquivo in sorted(os.listdir('.')):
+        if arquivo.startswith('.env.') and not arquivo.endswith('-git'):
+            try:
+                # Carrega apenas para ler NOME_CLIENTE
+                config = dotenv_values(arquivo)
+                nome_cliente = config.get('NOME_CLIENTE', arquivo.replace('.env.', '').upper())
+                clientes.append((nome_cliente, arquivo))
+            except Exception as e:
+                # Se houver erro, usa o nome do arquivo
+                nome_fallback = arquivo.replace('.env.', '').upper()
+                clientes.append((nome_fallback, arquivo))
+                print(f"⚠️  Aviso: Não foi possível ler NOME_CLIENTE de {arquivo}")
+    
+    return clientes
+
+def exibir_menu_clientes():
+    """Exibe menu e retorna o arquivo .env selecionado."""
+    clientes = listar_clientes()
+    
+    if not clientes:
+        print("\n" + "="*60)
+        print("❌ ERRO: Nenhum arquivo de configuração encontrado!")
+        print("="*60)
+        print("\nCrie arquivos no formato:")
+        print("  .env.cliente1")
+        print("  .env.cliente2")
+        print("  .env.cliente3")
+        print("\nUse o arquivo .env-git como template.")
+        print("="*60)
+        sys.exit(1)
+    
+    print("\n" + "="*60)
+    print(" 🏢  SELEÇÃO DE CLIENTE - DIAGNÓSTICO DE DIVERGÊNCIAS")
+    print("="*60)
+    
+    for idx, (nome, _) in enumerate(clientes, 1):
+        print(f"  {idx}. {nome}")
+    
+    print("  0. Sair")
+    print("="*60)
+    
+    while True:
+        try:
+            escolha = input("\n➤ Selecione o cliente (número): ").strip()
+            
+            if escolha == '0':
+                print("\n⚠️  Operação cancelada pelo usuário.\n")
+                sys.exit(0)
+            
+            idx = int(escolha) - 1
+            
+            if 0 <= idx < len(clientes):
+                nome, arquivo = clientes[idx]
+                print(f"\n✅ Cliente selecionado: {nome}")
+                print("="*60)
+                return arquivo, nome
+            else:
+                print("❌ Opção inválida! Tente novamente.")
+        
+        except ValueError:
+            print("❌ Digite um número válido!")
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Operação cancelada.\n")
+            sys.exit(0)
+
+# Seleciona o cliente e carrega as variáveis de ambiente
+env_file, NOME_CLIENTE_SELECIONADO = exibir_menu_clientes()
+load_dotenv(env_file)
 
 # --- CONFIGURAÇÃO DAS CONEXÕES VIA ENV ---
 DB_GESTAO = {
@@ -345,7 +419,10 @@ def testar_conexoes(db_gestao, db_contrato, db_pessoa):
         return True
 
 def main():
-    print("--- INICIANDO DIAGNÓSTICO DE DIVERGÊNCIAS ---")
+    # Obtém o nome do cliente para usar nos relatórios
+    cliente_nome = os.getenv('NOME_CLIENTE', 'CLIENTE')
+    
+    print(f"--- INICIANDO DIAGNÓSTICO DE DIVERGÊNCIAS [{cliente_nome}] ---")
     
     # Gerencia túnel SSH automaticamente
     with gerenciar_tunnel_ssh():
@@ -547,7 +624,9 @@ def main():
             '3-Ambos CPF Inexistentes': (lista_ambos_inexistentes, headers),
             '4-Outros Erros': (lista_erros_outros, headers)
         }
-        salvar_excel_consolidado(relatorios, 'relatorio_divergencias.xlsx')
+        # Gera nome do arquivo com nome do cliente
+        nome_arquivo_relatorio = f'relatorio_{cliente_nome.lower().replace(" ", "_")}.xlsx'
+        salvar_excel_consolidado(relatorios, nome_arquivo_relatorio)
 
 if __name__ == "__main__":
     main()
