@@ -9,6 +9,9 @@ import time
 import socket
 from dotenv import load_dotenv  # <--- IMPORTANTE
 from contextlib import contextmanager
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 
 # Carrega as variáveis do arquivo .env
 load_dotenv()
@@ -80,6 +83,81 @@ def salvar_csv(nome_arquivo, dados, cabecalho):
         print(f"-> Relatório salvo: {caminho} ({len(dados)} registros)")
     except Exception as e:
         print(f"Erro ao salvar {nome_arquivo}: {e}")
+
+def salvar_excel_consolidado(relatorios_dict, nome_arquivo='relatorio_divergencias.xlsx'):
+    """
+    Salva múltiplos relatórios em um único arquivo Excel com abas separadas.
+    
+    Args:
+        relatorios_dict: dict com formato {'Nome da Aba': (dados, cabecalho)}
+        nome_arquivo: nome do arquivo Excel a ser gerado
+    """
+    caminho = os.path.join(os.getcwd(), nome_arquivo)
+    
+    try:
+        wb = Workbook()
+        # Remove a aba padrão criada
+        if 'Sheet' in wb.sheetnames:
+            wb.remove(wb['Sheet'])
+        
+        for nome_aba, (dados, cabecalho) in relatorios_dict.items():
+            # Cria nova aba
+            ws = wb.create_sheet(title=nome_aba)
+            
+            # Se não houver dados, adiciona apenas cabeçalho e mensagem
+            if not dados:
+                ws.append(cabecalho)
+                ws.append(['Nenhum registro encontrado'])
+                continue
+            
+            # Adiciona cabeçalho
+            ws.append(cabecalho)
+            
+            # Estiliza cabeçalho
+            header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+            header_font = Font(bold=True, color='FFFFFF', size=11)
+            header_alignment = Alignment(horizontal='center', vertical='center')
+            
+            for col_num, _ in enumerate(cabecalho, 1):
+                cell = ws.cell(row=1, column=col_num)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = header_alignment
+            
+            # Adiciona dados
+            for item in dados:
+                linha = [item.get(col, '') for col in cabecalho]
+                ws.append(linha)
+            
+            # Ajusta largura das colunas
+            for col_num, col_name in enumerate(cabecalho, 1):
+                column_letter = get_column_letter(col_num)
+                # Calcula largura baseada no conteúdo
+                max_length = len(str(col_name))
+                for row in ws.iter_rows(min_row=2, max_row=min(100, len(dados)+1), min_col=col_num, max_col=col_num):
+                    for cell in row:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                adjusted_width = min(max_length + 2, 50)  # Limite de 50 caracteres
+                ws.column_dimensions[column_letter].width = adjusted_width
+            
+            # Congela primeira linha (cabeçalho)
+            ws.freeze_panes = 'A2'
+        
+        # Salva o arquivo
+        wb.save(caminho)
+        
+        # Conta total de registros
+        total_registros = sum(len(dados) for dados, _ in relatorios_dict.values())
+        print(f"\n📊 Relatório Excel consolidado salvo: {caminho}")
+        print(f"   └─ {len(relatorios_dict)} abas criadas | {total_registros} registros totais")
+        
+    except Exception as e:
+        print(f"⚠️  Erro ao salvar arquivo Excel: {e}")
+        print(f"   Os arquivos CSV individuais foram mantidos como backup.")
 
 def verificar_porta_disponivel(port):
     """Verifica se uma porta está disponível para uso."""
@@ -461,10 +539,22 @@ def main():
                    'existe_segurado_gestao', 'existe_segurado_accounts', 
                    'dono_real_eh_accounts', 'email_comum']
 
+        # Salva CSVs individuais (backup)
+        print("\n📁 Salvando relatórios CSV individuais...")
         salvar_csv('relatorio_email_duplicado.csv', lista_email_duplicado, headers)
         salvar_csv('relatorio_um_cpf_inexistente.csv', lista_um_inexistente, headers)
         salvar_csv('relatorio_ambos_cpf_inexistentes.csv', lista_ambos_inexistentes, headers)
         salvar_csv('relatorio_outros_erros.csv', lista_erros_outros, headers)
+        
+        # Salva arquivo Excel consolidado com todas as abas
+        print("\n📊 Gerando arquivo Excel consolidado...")
+        relatorios = {
+            '1-Emails Duplicados': (lista_email_duplicado, headers),
+            '2-Um CPF Inexistente': (lista_um_inexistente, headers),
+            '3-Ambos CPF Inexistentes': (lista_ambos_inexistentes, headers),
+            '4-Outros Erros': (lista_erros_outros, headers)
+        }
+        salvar_excel_consolidado(relatorios, 'relatorio_divergencias.xlsx')
 
 if __name__ == "__main__":
     main()
