@@ -488,13 +488,11 @@ def main():
             
             # Estrutura base do relatório
             linha_relatorio = {
-                'id_accounts': item['id_account'],
-                'sso_id_gestao': item['sso_id_gestao'],
+                'uuid_comum': item['id_account'],  # sso_id em gestão = id em accounts
                 'cpf_gestao': item['cpf_visual_gestao'],
                 'cpf_accounts': item['cpf_visual_accounts'],
                 'existe_segurado_gestao': "SIM" if existe_ges else "NAO",
                 'existe_segurado_accounts': "SIM" if existe_acc else "NAO",
-                'dono_real_eh_accounts': "SIM" if existe_acc else "NAO", # Conforme solicitado
                 'email_comum': None
             }
 
@@ -534,18 +532,11 @@ def main():
         print(f"TOTAL ANALISADO: {len(divergencias)}")
         print("="*40)
 
-        # Headers para CSV
-        headers = ['id_accounts', 'sso_id_gestao', 'cpf_gestao', 'cpf_accounts', 
+        # Headers para relatórios
+        headers = ['uuid_comum', 'cpf_gestao', 'cpf_accounts', 
                    'existe_segurado_gestao', 'existe_segurado_accounts', 
-                   'dono_real_eh_accounts', 'email_comum']
+                   'email_comum']
 
-        # Salva CSVs individuais (backup)
-        print("\n📁 Salvando relatórios CSV individuais...")
-        salvar_csv('relatorio_email_duplicado.csv', lista_email_duplicado, headers)
-        salvar_csv('relatorio_um_cpf_inexistente.csv', lista_um_inexistente, headers)
-        salvar_csv('relatorio_ambos_cpf_inexistentes.csv', lista_ambos_inexistentes, headers)
-        salvar_csv('relatorio_outros_erros.csv', lista_erros_outros, headers)
-        
         # Salva arquivo Excel consolidado com todas as abas
         print("\n📊 Gerando arquivo Excel consolidado...")
         relatorios = {
