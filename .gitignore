@@ -1,3 +1,5 @@
-.env
+.env.ipalerj
+.env.sassepe
+.env.issec
 *.csv
 *.xlsx

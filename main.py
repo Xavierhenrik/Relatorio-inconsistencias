@@ -37,7 +37,7 @@ def listar_clientes():
     return clientes
 
 def exibir_menu_clientes():
-    """Exibe menu e retorna o arquivo .env selecionado."""
+    """Exibe menu e retorna o arquivo .env selecionado ou lista de todos."""
     clientes = listar_clientes()
     
     if not clientes:
@@ -59,6 +59,7 @@ def exibir_menu_clientes():
     for idx, (nome, _) in enumerate(clientes, 1):
         print(f"  {idx}. {nome}")
     
+    print(f"\n  {len(clientes) + 1}. 🚀 EXECUTAR TODOS OS CLIENTES")
     print("  0. Sair")
     print("="*60)
     
@@ -69,6 +70,12 @@ def exibir_menu_clientes():
             if escolha == '0':
                 print("\n⚠️  Operação cancelada pelo usuário.\n")
                 sys.exit(0)
+            
+            # Opção "Todos"
+            if escolha == str(len(clientes) + 1):
+                print(f"\n✅ Selecionado: EXECUTAR TODOS OS CLIENTES ({len(clientes)} clientes)")
+                print("="*60)
+                return 'TODOS', clientes
             
             idx = int(escolha) - 1
             
@@ -87,50 +94,60 @@ def exibir_menu_clientes():
             sys.exit(0)
 
 # Seleciona o cliente e carrega as variáveis de ambiente
-env_file, NOME_CLIENTE_SELECIONADO = exibir_menu_clientes()
-load_dotenv(env_file)
+resultado_menu = exibir_menu_clientes()
 
-# --- CONFIGURAÇÃO DAS CONEXÕES VIA ENV ---
-DB_GESTAO = {
-    'host': os.getenv('DB_GESTAO_HOST'),
-    'database': os.getenv('DB_GESTAO_NAME'),
-    'user': os.getenv('DB_GESTAO_USER'),
-    'password': os.getenv('DB_GESTAO_PASS')
-}
+# Verifica se é execução única ou múltipla
+EXECUTAR_TODOS = False
+if resultado_menu[0] == 'TODOS':
+    EXECUTAR_TODOS = True
+    LISTA_CLIENTES = resultado_menu[1]  # Lista de (nome, arquivo)
+else:
+    env_file, NOME_CLIENTE_SELECIONADO = resultado_menu
+    load_dotenv(env_file)
 
-DB_CONTRATO = {
-    'host': os.getenv('DB_CONTRATO_HOST'),
-    'database': os.getenv('DB_CONTRATO_NAME'),
-    'user': os.getenv('DB_CONTRATO_USER'),
-    'password': os.getenv('DB_CONTRATO_PASS')
-}
+# --- FUNÇÕES DE CONFIGURAÇÃO ---
+def carregar_configuracoes():
+    """Carrega configurações do arquivo .env atual."""
+    DB_GESTAO = {
+        'host': os.getenv('DB_GESTAO_HOST'),
+        'database': os.getenv('DB_GESTAO_NAME'),
+        'user': os.getenv('DB_GESTAO_USER'),
+        'password': os.getenv('DB_GESTAO_PASS')
+    }
 
-DB_PESSOA = {
-    'host': os.getenv('DB_PESSOA_HOST'),
-    'database': os.getenv('DB_PESSOA_NAME'),
-    'user': os.getenv('DB_PESSOA_USER'),
-    'password': os.getenv('DB_PESSOA_PASS')
-}
+    DB_CONTRATO = {
+        'host': os.getenv('DB_CONTRATO_HOST'),
+        'database': os.getenv('DB_CONTRATO_NAME'),
+        'user': os.getenv('DB_CONTRATO_USER'),
+        'password': os.getenv('DB_CONTRATO_PASS')
+    }
 
-SENHA_ACCOUNTS = os.getenv('DB_ACCOUNTS_PASS')
-URL_ACCOUNTS = os.getenv('URL_ACCOUNTS')
-DB_ACCOUNTS_NAME_USER= os.getenv('DB_ACCOUNTS_NAME_USER')
+    DB_PESSOA = {
+        'host': os.getenv('DB_PESSOA_HOST'),
+        'database': os.getenv('DB_PESSOA_NAME'),
+        'user': os.getenv('DB_PESSOA_USER'),
+        'password': os.getenv('DB_PESSOA_PASS')
+    }
 
-# --- CONFIGURAÇÃO SSH TUNNEL (OBRIGATÓRIO) ---
-SSH_CONFIG = {
-    'ssh_host': os.getenv('SSH_HOST'),
-    'ssh_user': os.getenv('SSH_USER'),
-    'ssh_port': int(os.getenv('SSH_PORT', '22')),
-    'ssh_password': os.getenv('SSH_PASSWORD'),
-    'ssh_pkey': os.getenv('SSH_PKEY_PATH'),  # Caminho para chave privada (opcional)
-    'remote_bind_address': (os.getenv('SSH_REMOTE_DB_HOST', 'localhost'), int(os.getenv('SSH_REMOTE_DB_PORT', '5432'))),
-    'local_bind_port': int(os.getenv('SSH_LOCAL_PORT', '5435'))
-}
+    SENHA_ACCOUNTS = os.getenv('DB_ACCOUNTS_PASS')
+    URL_ACCOUNTS = os.getenv('URL_ACCOUNTS')
+    DB_ACCOUNTS_NAME_USER = os.getenv('DB_ACCOUNTS_NAME_USER')
 
-# Validação: túnel SSH é obrigatório
-if not SSH_CONFIG['ssh_host'] or not SSH_CONFIG['ssh_user']:
-    print("ERRO: SSH_HOST e SSH_USER são obrigatórios no arquivo .env")
-    sys.exit(1)
+    SSH_CONFIG = {
+        'ssh_host': os.getenv('SSH_HOST'),
+        'ssh_user': os.getenv('SSH_USER'),
+        'ssh_port': int(os.getenv('SSH_PORT', '22')),
+        'ssh_password': os.getenv('SSH_PASSWORD'),
+        'ssh_pkey': os.getenv('SSH_PKEY_PATH'),
+        'remote_bind_address': (os.getenv('SSH_REMOTE_DB_HOST', 'localhost'), int(os.getenv('SSH_REMOTE_DB_PORT', '5432'))),
+        'local_bind_port': int(os.getenv('SSH_LOCAL_PORT', '5435'))
+    }
+    
+    # Validação: túnel SSH é obrigatório
+    if not SSH_CONFIG['ssh_host'] or not SSH_CONFIG['ssh_user']:
+        raise ValueError("SSH_HOST e SSH_USER são obrigatórios no arquivo .env")
+    
+    return DB_GESTAO, DB_CONTRATO, DB_PESSOA, SSH_CONFIG, SENHA_ACCOUNTS, URL_ACCOUNTS, DB_ACCOUNTS_NAME_USER
 
 # --- FUNÇÕES AUXILIARES ---
 def limpar_cpf(cpf):
@@ -160,13 +177,94 @@ def salvar_csv(nome_arquivo, dados, cabecalho):
     except Exception as e:
         print(f"Erro ao salvar {nome_arquivo}: {e}")
 
-def salvar_excel_consolidado(relatorios_dict, nome_arquivo='relatorio_divergencias.xlsx'):
+def salvar_resumo_consolidado_lote(lista_resumos, nome_arquivo='resumo_consolidado_lote.xlsx'):
+    """
+    Salva um Excel consolidado com o resumo estatístico de todos os clientes processados em lote.
+    
+    Args:
+        lista_resumos: lista de dicts com dados de cada cliente
+        nome_arquivo: nome do arquivo Excel a ser gerado
+    """
+    caminho = os.path.join(os.getcwd(), nome_arquivo)
+    
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Resumo Consolidado'
+        
+        # Cabeçalho
+        headers = ['Cliente', 'E-mails Duplicados', 'Um CPF Inexistente', 
+                   'Ambos CPF Inexistentes', 'Outros Erros', 'Total Analisado']
+        ws.append(headers)
+        
+        # Estiliza cabeçalho
+        header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+        header_font = Font(bold=True, color='FFFFFF', size=12)
+        header_alignment = Alignment(horizontal='center', vertical='center')
+        
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+        
+        # Adiciona dados de cada cliente
+        for resumo in lista_resumos:
+            ws.append([
+                resumo['cliente'],
+                resumo['emails_duplicados'],
+                resumo['um_cpf_inexistente'],
+                resumo['ambos_cpf_inexistentes'],
+                resumo['outros_erros'],
+                resumo['total_analisado']
+            ])
+        
+        # Linha de TOTAL
+        row_total = len(lista_resumos) + 2
+        ws.append([
+            'TOTAL',
+            sum(r['emails_duplicados'] for r in lista_resumos),
+            sum(r['um_cpf_inexistente'] for r in lista_resumos),
+            sum(r['ambos_cpf_inexistentes'] for r in lista_resumos),
+            sum(r['outros_erros'] for r in lista_resumos),
+            sum(r['total_analisado'] for r in lista_resumos)
+        ])
+        
+        # Estiliza linha de total
+        total_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+        total_font = Font(bold=True, size=11)
+        
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_total, column=col_num)
+            cell.fill = total_fill
+            cell.font = total_font
+            cell.alignment = Alignment(horizontal='center' if col_num > 1 else 'left')
+        
+        # Ajusta largura das colunas
+        ws.column_dimensions['A'].width = 25
+        for col in ['B', 'C', 'D', 'E', 'F']:
+            ws.column_dimensions[col].width = 20
+        
+        # Congela primeira linha
+        ws.freeze_panes = 'A2'
+        
+        # Salva arquivo
+        wb.save(caminho)
+        
+        print(f"\n📊 Resumo consolidado salvo: {caminho}")
+        print(f"   └─ {len(lista_resumos)} clientes processados")
+        
+    except Exception as e:
+        print(f"⚠️  Erro ao salvar resumo consolidado: {e}")
+
+def salvar_excel_consolidado(relatorios_dict, nome_arquivo='relatorio_divergencias.xlsx', silent=False):
     """
     Salva múltiplos relatórios em um único arquivo Excel com abas separadas.
     
     Args:
         relatorios_dict: dict com formato {'Nome da Aba': (dados, cabecalho)}
         nome_arquivo: nome do arquivo Excel a ser gerado
+        silent: se True, não exibe mensagens de progresso
     """
     caminho = os.path.join(os.getcwd(), nome_arquivo)
     
@@ -227,13 +325,15 @@ def salvar_excel_consolidado(relatorios_dict, nome_arquivo='relatorio_divergenci
         wb.save(caminho)
         
         # Conta total de registros
-        total_registros = sum(len(dados) for dados, _ in relatorios_dict.values())
-        print(f"\n📊 Relatório Excel consolidado salvo: {caminho}")
-        print(f"   └─ {len(relatorios_dict)} abas criadas | {total_registros} registros totais")
+        if not silent:
+            total_registros = sum(len(dados) for dados, _ in relatorios_dict.values())
+            print(f"\n📊 Relatório Excel consolidado salvo: {caminho}")
+            print(f"   └─ {len(relatorios_dict)} abas criadas | {total_registros} registros totais")
         
     except Exception as e:
-        print(f"⚠️  Erro ao salvar arquivo Excel: {e}")
-        print(f"   Os arquivos CSV individuais foram mantidos como backup.")
+        if not silent:
+            print(f"⚠️  Erro ao salvar arquivo Excel: {e}")
+            print(f"   Os arquivos CSV individuais foram mantidos como backup.")
 
 def verificar_porta_disponivel(port):
     """Verifica se uma porta está disponível para uso."""
@@ -259,7 +359,7 @@ def aguardar_porta_aberta(port, timeout=10):
     return False
 
 @contextmanager
-def gerenciar_tunnel_ssh():
+def gerenciar_tunnel_ssh(SSH_CONFIG):
     """Context manager para gerenciar ciclo de vida do túnel SSH usando comando nativo."""
     processo_ssh = None
     
@@ -360,7 +460,7 @@ def gerenciar_tunnel_ssh():
                     print("⚠️  (processo pode continuar em background)")
             print("[SSH] Túnel SSH encerrado.")
 
-def ajustar_hosts_para_tunnel(db_config):
+def ajustar_hosts_para_tunnel(db_config, SSH_CONFIG):
     """Ajusta host e porta dos bancos para usar túnel SSH (obrigatório)."""
     config = db_config.copy()
     # Todos os bancos acessam via localhost na porta do túnel
@@ -418,36 +518,49 @@ def testar_conexoes(db_gestao, db_contrato, db_pessoa):
         print("\n✅ Conexões estabelecidas com sucesso!")
         return True
 
-def main():
+def main(modo_batch=False):
+    # Carrega configurações do ambiente atual
+    try:
+        DB_GESTAO, DB_CONTRATO, DB_PESSOA, SSH_CONFIG, SENHA_ACCOUNTS, URL_ACCOUNTS, DB_ACCOUNTS_NAME_USER = carregar_configuracoes()
+    except ValueError as e:
+        print(f"❌ ERRO: {e}")
+        sys.exit(1)
+    
     # Obtém o nome do cliente para usar nos relatórios
     cliente_nome = os.getenv('NOME_CLIENTE', 'CLIENTE')
     
-    print(f"--- INICIANDO DIAGNÓSTICO DE DIVERGÊNCIAS [{cliente_nome}] ---")
+    if not modo_batch:
+        print(f"--- INICIANDO DIAGNÓSTICO DE DIVERGÊNCIAS [{cliente_nome}] ---")
     
     # Gerencia túnel SSH automaticamente
-    with gerenciar_tunnel_ssh():
+    with gerenciar_tunnel_ssh(SSH_CONFIG):
         # Ajusta configurações dos bancos para usar túnel se necessário
-        db_gestao_ajustado = ajustar_hosts_para_tunnel(DB_GESTAO)
-        db_contrato_ajustado = ajustar_hosts_para_tunnel(DB_CONTRATO)
-        db_pessoa_ajustado = ajustar_hosts_para_tunnel(DB_PESSOA)
+        db_gestao_ajustado = ajustar_hosts_para_tunnel(DB_GESTAO, SSH_CONFIG)
+        db_contrato_ajustado = ajustar_hosts_para_tunnel(DB_CONTRATO, SSH_CONFIG)
+        db_pessoa_ajustado = ajustar_hosts_para_tunnel(DB_PESSOA, SSH_CONFIG)
         
         # PASSO 0: TESTE DE CONEXÕES
-        conexoes_ok = testar_conexoes(db_gestao_ajustado, db_contrato_ajustado, db_pessoa_ajustado)
-        
-        if not conexoes_ok:
-            print("\n⚠️  Encerrando script devido a erros de conexão.")
-            return
-        
-        # Solicita confirmação do usuário
-        print("\n" + "="*50)
-        resposta = input("Prosseguir com análise? (S/N): ").strip().upper()
-        print("="*50)
-        
-        if resposta not in ['S', 'SIM', 'Y', 'YES']:
-            print("\n⚠️  Análise cancelada pelo usuário.")
-            return
-        
-        print("\n🚀 Iniciando análise de divergências...\n")
+        if not modo_batch:
+            # Modo interativo: testa conexões e pede confirmação
+            conexoes_ok = testar_conexoes(db_gestao_ajustado, db_contrato_ajustado, db_pessoa_ajustado)
+            
+            if not conexoes_ok:
+                print("\n⚠️  Encerrando script devido a erros de conexão.")
+                return
+            
+            # Solicita confirmação do usuário
+            print("\n" + "="*50)
+            resposta = input("Prosseguir com análise? (S/N): ").strip().upper()
+            print("="*50)
+            
+            if resposta not in ['S', 'SIM', 'Y', 'YES']:
+                print("\n⚠️  Análise cancelada pelo usuário.")
+                return
+            
+            print("\n🚀 Iniciando análise de divergências...\n")
+        else:
+            # Modo batch: execução silenciosa e rápida
+            print("🔄 Executando análise...")
         
         # LISTAS PARA RELATÓRIOS
         lista_email_duplicado = []
@@ -456,7 +569,8 @@ def main():
         lista_erros_outros = []
 
         # 1. BUSCAR DIVERGÊNCIAS (GESTAO + ACCOUNTS via DBLINK)
-        print("[1/4] Buscando divergências iniciais...")
+        if not modo_batch:
+            print("[1/4] Buscando divergências iniciais...")
         divergencias = []
         
         sql_base = f"""
@@ -504,7 +618,8 @@ def main():
         cpfs_tuple = tuple(todos_cpfs)
 
         # 2. VERIFICAR EXISTÊNCIA NO CONTRATO (SEGURADO)
-        print(f"[2/4] Validando {len(todos_cpfs)} CPFs na tabela Segurado...")
+        if not modo_batch:
+            print(f"[2/4] Validando {len(todos_cpfs)} CPFs na tabela Segurado...")
         cpfs_existentes_segurado = set()
         
         try:
@@ -526,7 +641,8 @@ def main():
             return
 
         # 3. BUSCAR EMAILS (PESSOA/CONTATO)
-        print("[3/4] Buscando e-mails no quarto banco...")
+        if not modo_batch:
+            print("[3/4] Buscando e-mails no quarto banco...")
         mapa_emails = {} # { 'cpf_limpo': 'email' }
         
         try:
@@ -555,7 +671,8 @@ def main():
             return
 
         # 4. PROCESSAMENTO LÓGICO E CONTAGEM
-        print("[4/4] Processando regras de negócio...")
+        if not modo_batch:
+            print("[4/4] Processando regras de negócio...")
 
         for item in divergencias:
             cpf_acc = item['cpf_accounts_limpo']
@@ -600,16 +717,22 @@ def main():
                 lista_erros_outros.append(linha_relatorio)
 
         # 5. EXIBIÇÃO E SALVAMENTO
-        print("\n" + "="*40)
-        print("RESUMO FINAL DA OPERAÇÃO")
-        print("="*40)
-        print(f"1. E-mails Duplicados (Inconsistência Confirmada): {len(lista_email_duplicado)}")
-        print(f"2. Um dos CPFs não existe em Segurado:             {len(lista_um_inexistente)}")
-        print(f"3. Ambos CPFs não existem em Segurado:             {len(lista_ambos_inexistentes)}")
-        print(f"4. Outros (Existem mas e-mail não bate/nulo):      {len(lista_erros_outros)}")
-        print("-" * 40)
-        print(f"TOTAL ANALISADO: {len(divergencias)}")
-        print("="*40)
+        if modo_batch:
+            # Modo batch: resumo simplificado
+            total_problemas = len(lista_email_duplicado) + len(lista_um_inexistente) + len(lista_ambos_inexistentes) + len(lista_erros_outros)
+            print(f"   ✅ Análise concluída: {len(divergencias)} divergências | {total_problemas} problemas encontrados")
+        else:
+            # Modo interativo: resumo detalhado
+            print("\n" + "="*40)
+            print("RESUMO FINAL DA OPERAÇÃO")
+            print("="*40)
+            print(f"1. E-mails Duplicados (Inconsistência Confirmada): {len(lista_email_duplicado)}")
+            print(f"2. Um dos CPFs não existe em Segurado:             {len(lista_um_inexistente)}")
+            print(f"3. Ambos CPFs não existem em Segurado:             {len(lista_ambos_inexistentes)}")
+            print(f"4. Outros (Existem mas e-mail não bate/nulo):      {len(lista_erros_outros)}")
+            print("-" * 40)
+            print(f"TOTAL ANALISADO: {len(divergencias)}")
+            print("="*40)
 
         # Headers para relatórios
         headers = ['uuid_comum', 'cpf_gestao', 'cpf_accounts', 
@@ -617,7 +740,8 @@ def main():
                    'email_comum']
 
         # Salva arquivo Excel consolidado com todas as abas
-        print("\n📊 Gerando arquivo Excel consolidado...")
+        if not modo_batch:
+            print("\n📊 Gerando arquivo Excel consolidado...")
         relatorios = {
             '1-Emails Duplicados': (lista_email_duplicado, headers),
             '2-Um CPF Inexistente': (lista_um_inexistente, headers),
@@ -626,7 +750,82 @@ def main():
         }
         # Gera nome do arquivo com nome do cliente
         nome_arquivo_relatorio = f'relatorio_{cliente_nome.lower().replace(" ", "_")}.xlsx'
-        salvar_excel_consolidado(relatorios, nome_arquivo_relatorio)
+        salvar_excel_consolidado(relatorios, nome_arquivo_relatorio, silent=modo_batch)
+        
+        # Retorna resumo se estiver em modo batch
+        if modo_batch:
+            return {
+                'cliente': cliente_nome,
+                'emails_duplicados': len(lista_email_duplicado),
+                'um_cpf_inexistente': len(lista_um_inexistente),
+                'ambos_cpf_inexistentes': len(lista_ambos_inexistentes),
+                'outros_erros': len(lista_erros_outros),
+                'total_analisado': len(divergencias)
+            }
 
 if __name__ == "__main__":
-    main()
+    if EXECUTAR_TODOS:
+        # Execução em lote para todos os clientes
+        print("\n" + "="*70)
+        print(f"🚀 EXECUÇÃO EM LOTE: {len(LISTA_CLIENTES)} CLIENTES")
+        print("="*70)
+        
+        inicio_lote = time.time()
+        resultados_geral = []
+        resumos_clientes = []  # Lista para armazenar resumos estatísticos
+        
+        for idx, (nome_cliente, arquivo_env) in enumerate(LISTA_CLIENTES, 1):
+            print(f"\n[{idx}/{len(LISTA_CLIENTES)}] 🔄 {nome_cliente}...", end=" ")
+            
+            # Limpa variáveis de ambiente anteriores
+            for key in list(os.environ.keys()):
+                if key.startswith('DB_') or key.startswith('SSH_') or key == 'NOME_CLIENTE':
+                    os.environ.pop(key, None)
+            
+            # Carrega novo ambiente
+            load_dotenv(arquivo_env, override=True)
+            
+            try:
+                # Executa análise em modo batch (sem confirmações)
+                resumo = main(modo_batch=True)
+                print("✅")
+                
+                # Armazena resumo estatístico
+                if resumo:
+                    resumos_clientes.append(resumo)
+                
+                resultados_geral.append((nome_cliente, "✅ Sucesso"))
+                    
+            except KeyboardInterrupt:
+                print("\n\n⚠️  Execução interrompida pelo usuário.")
+                print(f"   Clientes processados: {idx-1}/{len(LISTA_CLIENTES)}")
+                break
+            except Exception as e:
+                print(f"❌")
+                print(f"      └─ Erro: {str(e)[:100]}")
+                resultados_geral.append((nome_cliente, f"❌ Erro: {str(e)[:50]}"))
+                continue
+        
+        # Resumo final
+        tempo_total = time.time() - inicio_lote
+        minutos = int(tempo_total // 60)
+        segundos = int(tempo_total % 60)
+        
+        print("\n" + "="*70)
+        print("📋 RESUMO DA EXECUÇÃO EM LOTE")
+        print("="*70)
+        for nome, status in resultados_geral:
+            print(f"  {status} - {nome}")
+        print("="*70)
+        print(f"\n✅ Processamento concluído: {len(resultados_geral)}/{len(LISTA_CLIENTES)} clientes")
+        print(f"⏱️  Tempo total: {minutos}min {segundos}s")
+        
+        # Gera arquivo Excel consolidado com resumo estatístico de todos os clientes
+        if resumos_clientes:
+            print("\n" + "="*70)
+            salvar_resumo_consolidado_lote(resumos_clientes, 'resumo_consolidado_lote.xlsx')
+            print("="*70)
+        
+    else:
+        # Execução única para cliente selecionado
+        main()
