@@ -1,5 +1,10 @@
-.env.ipalerj
-.env.sassepe
-.env.issec
+# Arquivos de configuração com credenciais
+.env
+.env.*
+!.env-git
+
+# Relatórios gerados
 *.csv
 *.xlsx
+relatorio_*.xlsx
+resumo_consolidado_lote.xlsx
